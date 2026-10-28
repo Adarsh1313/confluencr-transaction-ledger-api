@@ -10,6 +10,7 @@ import {
 import { z } from 'zod';
 import type { Db } from './db.js';
 import { errorHandler } from './errors.js';
+import { accountRoutes } from './modules/accounts.js';
 
 export interface AppOptions {
   db: Db;
@@ -53,6 +54,13 @@ export async function buildApp({ db, logLevel = 'silent' }: AppOptions) {
       await db.query('SELECT 1');
       return { status: 'ok' as const };
     },
+  );
+
+  await app.register(
+    async (api) => {
+      await api.register(accountRoutes(db));
+    },
+    { prefix: '/api/v1' },
   );
 
   await app.ready();
