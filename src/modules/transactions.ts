@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import type { FastifyPluginAsyncZod } from 'fastify-type-provider-zod';
-import { withDatabaseTransaction, type Db, type DbClient } from '../db.js';
+import { isUniqueViolation, withDatabaseTransaction, type Db, type DbClient } from '../db.js';
 import { AppError, insufficientBalance } from '../errors.js';
 import { newId } from '../ids.js';
 import {
@@ -13,6 +13,7 @@ import {
   paginationQuery,
   referenceIdSchema,
   transactionTypeSchema,
+  type TransactionType,
 } from '../schemas.js';
 import { assertAccountExists, lockAccount } from './accounts.js';
 import { recordAttempt } from './attempts.js';
@@ -40,7 +41,9 @@ export const toTransaction = (row: TransactionRow): Transaction => ({
   created_at: row.created_at.toISOString(),
 });
 
-const UNIQUE_VIOLATION = '23505';
+/** The one balance rule: a Credit adds the amount, a Debit subtracts it. */
+export const applyToBalance = (balance: number, type: TransactionType, amount: number) =>
+  type === 'credit' ? balance + amount : balance - amount;
 
 const duplicateTransaction = (existing: Transaction) =>
   new AppError(
@@ -58,12 +61,12 @@ async function findByReference(client: DbClient | Db, accountId: string, referen
   return rows[0] ? toTransaction(rows[0]) : undefined;
 }
 
-/** Inserts one ledger entry and moves the account balance. Caller must hold the account lock. */
+/** Inserts one Transaction and moves the account balance. Caller must hold the account lock. */
 export async function insertTransaction(
   client: DbClient,
-  entry: {
+  input: {
     accountId: string;
-    type: 'credit' | 'debit';
+    type: TransactionType;
     amount: number;
     balanceAfter: number;
     referenceId: string;
@@ -76,16 +79,16 @@ export async function insertTransaction(
      VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *`,
     [
       newId('txn'),
-      entry.accountId,
-      entry.type,
-      entry.amount,
-      entry.description ?? null,
-      entry.referenceId,
-      entry.balanceAfter,
-      entry.transferId ?? null,
+      input.accountId,
+      input.type,
+      input.amount,
+      input.description ?? null,
+      input.referenceId,
+      input.balanceAfter,
+      input.transferId ?? null,
     ],
   );
-  await client.query('UPDATE accounts SET balance = $1 WHERE id = $2', [entry.balanceAfter, entry.accountId]);
+  await client.query('UPDATE accounts SET balance = $1 WHERE id = $2', [input.balanceAfter, input.accountId]);
   return toTransaction(rows[0]);
 }
 
@@ -101,7 +104,7 @@ type PostResult =
  */
 async function postTransaction(
   db: Db,
-  input: { accountId: string; type: 'credit' | 'debit'; amount: number; referenceId: string; description?: string },
+  input: { accountId: string; type: TransactionType; amount: number; referenceId: string; description?: string },
 ): Promise<Transaction> {
   let result: PostResult;
   try {
@@ -111,7 +114,7 @@ async function postTransaction(
       const existing = await findByReference(client, input.accountId, input.referenceId);
       if (existing) return { kind: 'duplicate', transaction: existing };
 
-      const balanceAfter = input.type === 'credit' ? account.balance + input.amount : account.balance - input.amount;
+      const balanceAfter = applyToBalance(account.balance, input.type, input.amount);
       if (balanceAfter < 0) {
         // Not a money movement: record it in the audit log and commit only that.
         await recordAttempt(client, {
@@ -131,7 +134,7 @@ async function postTransaction(
     });
   } catch (error) {
     // Last line of defence: the UNIQUE constraint caught a duplicate that slipped past the check.
-    if ((error as { code?: string }).code === UNIQUE_VIOLATION) {
+    if (isUniqueViolation(error)) {
       const existing = await findByReference(db, input.accountId, input.referenceId);
       if (existing) throw duplicateTransaction(existing);
     }

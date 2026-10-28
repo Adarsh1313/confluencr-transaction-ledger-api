@@ -23,6 +23,7 @@ export const referenceIdSchema = z
 export const descriptionSchema = z.string().trim().max(255).optional().describe('Optional, up to 255 characters');
 
 export const transactionTypeSchema = z.enum(['credit', 'debit']);
+export type TransactionType = z.infer<typeof transactionTypeSchema>;
 
 export const accountIdParams = z.object({ id: z.string().min(1).describe('Account ID, e.g. acc_…') });
 

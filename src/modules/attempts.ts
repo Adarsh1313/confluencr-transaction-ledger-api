@@ -9,6 +9,7 @@ import {
   paginationMeta,
   paginationQuery,
   transactionTypeSchema,
+  type TransactionType,
 } from '../schemas.js';
 import { assertAccountExists } from './accounts.js';
 
@@ -37,7 +38,7 @@ export async function recordAttempt(
   client: DbClient,
   attempt: {
     accountId: string;
-    type: 'credit' | 'debit';
+    type: TransactionType;
     amount: number;
     referenceId: string;
     description?: string | null;

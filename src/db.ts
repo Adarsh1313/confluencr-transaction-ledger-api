@@ -31,15 +31,30 @@ export async function withDatabaseTransaction<T>(
   work: (client: DbClient) => Promise<T>,
 ): Promise<T> {
   const client = await db.connect();
+  let broken: Error | undefined;
   try {
     await client.query('BEGIN');
     const result = await work(client);
     await client.query('COMMIT');
     return result;
   } catch (error) {
-    await client.query('ROLLBACK');
+    // If ROLLBACK itself fails the connection is unusable: discard it, and
+    // still report the original error rather than the rollback one.
+    await client.query('ROLLBACK').catch((rollbackError: Error) => (broken = rollbackError));
     throw error;
   } finally {
-    client.release();
+    client.release(broken);
   }
 }
+
+interface PgError {
+  code?: string;
+  constraint?: string;
+}
+
+/** True when Postgres rejected a write because a UNIQUE constraint already had that value. */
+export const isUniqueViolation = (error: unknown) => (error as PgError)?.code === '23505';
+
+/** True when Postgres rejected a write because the named CHECK constraint failed. */
+export const isCheckViolation = (error: unknown, constraint: string) =>
+  (error as PgError)?.code === '23514' && (error as PgError).constraint === constraint;

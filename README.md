@@ -49,7 +49,7 @@ Other scripts: `npm run typecheck`, `npm run build && npm start` (production bui
 | Atomicity | Writing the transaction and updating the balance happen inside one database transaction: both commit or neither does. |
 | Duplicate `reference_id` | Checked under the lock and backed by `UNIQUE (account_id, reference_id)`. Returns `409` with the original. |
 | Immutability | No edit or delete endpoints, **and** a Postgres trigger rejects any `UPDATE`/`DELETE` on `transactions`, even from a direct database connection. |
-| Balance consistency | The stored balance is updated in the same database transaction as each entry. Tests recompute the balance from the ledger after concurrent bursts and compare. |
+| Balance consistency | The stored balance is updated in the same database transaction as each Transaction. Tests recompute the balance from the ledger after concurrent bursts and compare. |
 | Transfers | Transfer row + debit + credit in one database transaction. Both accounts are locked in sorted ID order so opposite transfers can't deadlock. |
 | Rejected debits | Never touch the ledger. Logged separately in an audit table (`/attempts`), like a bank's internal log versus its official statement. |
 | Money precision | Integers in paise, never floating point. |

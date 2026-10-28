@@ -26,6 +26,7 @@ Every error has the same shape:
 | 409 | `DUPLICATE_TRANSFER` | `reference_id` already used for a transfer from this account. `details.transfer` is the original |
 | 422 | `INSUFFICIENT_BALANCE` | Debit or transfer larger than the balance. Recorded as an attempt |
 | 422 | `SAME_ACCOUNT_TRANSFER` | Source and destination are the same |
+| 422 | `BALANCE_LIMIT_EXCEEDED` | A credit (or the credit half of a transfer) would push the balance above 9,007,199,254,740,991 paise. Everything rolls back |
 | 500 | `INTERNAL_ERROR` | Unexpected error (no internals leaked) |
 
 ---

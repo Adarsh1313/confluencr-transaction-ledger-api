@@ -1,5 +1,6 @@
 import type { FastifyError, FastifyReply, FastifyRequest } from 'fastify';
 import { hasZodFastifySchemaValidationErrors } from 'fastify-type-provider-zod';
+import { isCheckViolation } from './db.js';
 
 export type ErrorCode =
   | 'VALIDATION_ERROR'
@@ -12,6 +13,7 @@ export type ErrorCode =
   | 'DUPLICATE_TRANSFER'
   | 'INSUFFICIENT_BALANCE'
   | 'SAME_ACCOUNT_TRANSFER'
+  | 'BALANCE_LIMIT_EXCEEDED'
   | 'INTERNAL_ERROR';
 
 export class AppError extends Error {
@@ -55,6 +57,12 @@ export function errorHandler(error: FastifyError, request: FastifyRequest, reply
       issues.some((issue) => issue.field === 'page' || issue.field === 'limit');
     const code: ErrorCode = isPagination ? 'INVALID_PAGINATION' : 'VALIDATION_ERROR';
     return send(reply, 400, code, `Invalid ${error.validationContext ?? 'request'}`, { issues });
+  }
+
+  // The database's balance ceiling (JavaScript's exact-integer limit) refused a credit.
+  // The whole database transaction has already rolled back, so nothing changed.
+  if (isCheckViolation(error, 'accounts_balance_max')) {
+    return send(reply, 422, 'BALANCE_LIMIT_EXCEEDED', 'This credit would take the balance above the maximum allowed');
   }
 
   // Malformed JSON, empty JSON body, wrong content type, etc.

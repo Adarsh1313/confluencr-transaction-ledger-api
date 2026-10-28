@@ -1,12 +1,12 @@
 import { z } from 'zod';
 import type { FastifyPluginAsyncZod } from 'fastify-type-provider-zod';
-import { withDatabaseTransaction, type Db, type DbClient } from '../db.js';
+import { isUniqueViolation, withDatabaseTransaction, type Db, type DbClient } from '../db.js';
 import { AppError, insufficientBalance } from '../errors.js';
 import { newId } from '../ids.js';
 import { amountSchema, descriptionSchema, errorResponseSchema, referenceIdSchema } from '../schemas.js';
 import { lockAccount } from './accounts.js';
 import { recordAttempt } from './attempts.js';
-import { insertTransaction } from './transactions.js';
+import { applyToBalance, insertTransaction } from './transactions.js';
 
 export const transferSchema = z.object({
   id: z.string(),
@@ -37,8 +37,6 @@ async function findTransfer(client: DbClient | Db, where: string, params: unknow
   return rows[0] ? { ...rows[0], created_at: rows[0].created_at.toISOString() } : undefined;
 }
 
-const UNIQUE_VIOLATION = '23505';
-
 const duplicateTransfer = (existing: Transfer) =>
   new AppError(
     409,
@@ -61,17 +59,11 @@ interface TransferInput {
 }
 
 /**
- * Moves money between two accounts in ONE database transaction: the transfer
- * record, the debit on the source and the credit on the destination either all
- * commit or none do, so a partial transfer is impossible.
+ * Moves money between two accounts in ONE database transaction: the Transfer
+ * row, the Debit on the source and the Credit on the destination either all
+ * commit or none do, so a partial Transfer is impossible.
  */
 async function createTransfer(db: Db, input: TransferInput): Promise<Transfer> {
-  if (input.fromAccountId === input.toAccountId) {
-    throw new AppError(422, 'SAME_ACCOUNT_TRANSFER', 'Source and destination accounts must be different', {
-      account_id: input.fromAccountId,
-    });
-  }
-
   let result: TransferResult;
   try {
     result = await withDatabaseTransaction(db, async (client): Promise<TransferResult> => {
@@ -84,6 +76,13 @@ async function createTransfer(db: Db, input: TransferInput): Promise<Transfer> {
       ]);
       const from = locked.get(input.fromAccountId)!;
       const to = locked.get(input.toAccountId)!;
+
+      // Checked after locking so a missing account is reported as 404 first.
+      if (from.id === to.id) {
+        throw new AppError(422, 'SAME_ACCOUNT_TRANSFER', 'Source and destination accounts must be different', {
+          account_id: from.id,
+        });
+      }
 
       const existing = await findTransfer(client, 't.from_account_id = $1 AND t.reference_id = $2', [
         input.fromAccountId,
@@ -117,7 +116,7 @@ async function createTransfer(db: Db, input: TransferInput): Promise<Transfer> {
         accountId: from.id,
         type: 'debit',
         amount: input.amount,
-        balanceAfter: from.balance - input.amount,
+        balanceAfter: applyToBalance(from.balance, 'debit', input.amount),
         referenceId: legReference,
         description: input.description,
         transferId,
@@ -126,7 +125,7 @@ async function createTransfer(db: Db, input: TransferInput): Promise<Transfer> {
         accountId: to.id,
         type: 'credit',
         amount: input.amount,
-        balanceAfter: to.balance + input.amount,
+        balanceAfter: applyToBalance(to.balance, 'credit', input.amount),
         referenceId: legReference,
         description: input.description,
         transferId,
@@ -135,7 +134,7 @@ async function createTransfer(db: Db, input: TransferInput): Promise<Transfer> {
       return { kind: 'created', transfer: (await findTransfer(client, 't.id = $1', [transferId]))! };
     });
   } catch (error) {
-    if ((error as { code?: string }).code === UNIQUE_VIOLATION) {
+    if (isUniqueViolation(error)) {
       const existing = await findTransfer(db, 't.from_account_id = $1 AND t.reference_id = $2', [
         input.fromAccountId,
         input.referenceId,
