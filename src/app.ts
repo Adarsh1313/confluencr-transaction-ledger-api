@@ -13,6 +13,7 @@ import { errorHandler } from './errors.js';
 import { accountRoutes } from './modules/accounts.js';
 import { attemptRoutes } from './modules/attempts.js';
 import { transactionRoutes } from './modules/transactions.js';
+import { transferRoutes } from './modules/transfers.js';
 
 export interface AppOptions {
   db: Db;
@@ -63,6 +64,7 @@ export async function buildApp({ db, logLevel = 'silent' }: AppOptions) {
       await api.register(accountRoutes(db));
       await api.register(transactionRoutes(db));
       await api.register(attemptRoutes(db));
+      await api.register(transferRoutes(db));
     },
     { prefix: '/api/v1' },
   );
