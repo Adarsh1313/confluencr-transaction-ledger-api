@@ -12,7 +12,8 @@
     "start": "node dist/server.js",
     "migrate": "tsx src/migrate.ts",
     "test": "vitest run",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "verify": "tsx scripts/verify.ts"
   },
   "repository": {
     "type": "git",
