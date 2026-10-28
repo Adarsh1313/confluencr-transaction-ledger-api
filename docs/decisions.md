@@ -26,6 +26,9 @@ Plain-language record of every engineering decision, the options considered and 
 | Q18 | Tests | Integration tests on real Postgres (`ledger_test` schema), incl. 20-parallel-debit concurrency test, Vitest | Unit tests with fake DB | Only a real DB can prove locks and constraints work. |
 | Q19 | Limits | name 1–100 (trimmed); description optional ≤255; reference_id 1–100; amount integer 1–10¹² paise | | Keeps amounts inside JS's exact-integer range. |
 | Q20 | Hosting region | Supabase in Mumbai (ap-south-1) | US/EU regions | DB distance dominates latency for Indian users. |
+| B1 | Running balance | Each transaction stores `balance_after` | Compute on read | Made during build: history reads like a bank statement at no cost. |
+| B2 | Table location | Dedicated `ledger` schema, not Supabase `public` | `public` | Made during build: Supabase exposes `public` through an auto-generated REST API; a private schema keeps the ledger reachable only via our API. |
+| B3 | created_at | `clock_timestamp()` (time of the insert) | `now()` (time the database transaction started) | Made during build: a request that waited for a lock gets the time it actually wrote, so newest-first stays truthful. |
 | Q9 | Terms | "Transaction" = ledger entry; "database transaction" = all-or-nothing wrapper | | Avoids the most common confusion in ledger interviews. |
 
 ## Notes

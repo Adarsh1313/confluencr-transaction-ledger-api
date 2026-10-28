@@ -1,0 +1,16 @@
+# Local Postgres for reviewers who don't want to use a hosted database.
+# Usage: docker compose up -d, then set DATABASE_URL as shown in the README.
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: ledger
+    ports:
+      - '5432:5432'
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U postgres']
+      interval: 2s
+      timeout: 3s
+      retries: 15
