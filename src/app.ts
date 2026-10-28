@@ -11,6 +11,8 @@ import { z } from 'zod';
 import type { Db } from './db.js';
 import { errorHandler } from './errors.js';
 import { accountRoutes } from './modules/accounts.js';
+import { attemptRoutes } from './modules/attempts.js';
+import { transactionRoutes } from './modules/transactions.js';
 
 export interface AppOptions {
   db: Db;
@@ -59,6 +61,8 @@ export async function buildApp({ db, logLevel = 'silent' }: AppOptions) {
   await app.register(
     async (api) => {
       await api.register(accountRoutes(db));
+      await api.register(transactionRoutes(db));
+      await api.register(attemptRoutes(db));
     },
     { prefix: '/api/v1' },
   );
