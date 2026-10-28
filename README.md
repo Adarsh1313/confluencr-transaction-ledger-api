@@ -1,94 +1,103 @@
 # Transaction Ledger API
 
-A backend for a simple money ledger: create accounts, post credits and debits, read balances, page through transaction history, and transfer money between accounts. It is built so the balance is always correct, even when requests arrive at the same moment, are retried, or fail halfway.
+A backend for a money ledger: create accounts, post credits and debits, read balances, page through transaction history, and transfer money between accounts. The balance stays correct even when requests arrive at the same moment, are retried, or fail halfway.
 
-**Stack:** Node.js + TypeScript, Fastify, Zod, PostgreSQL (plain SQL via `pg`), Vitest.
-
-- [API reference](docs/API.md), plus interactive Swagger docs at `/docs` once running
-- [Decision log](docs/decisions.md): every design choice, the alternatives and why
-- [Glossary](GLOSSARY.md): the domain terms used in code and docs
+**Stack:** Node.js + TypeScript, Fastify, Zod, PostgreSQL, Vitest.
 
 ## Run it locally
 
-Requirements: Node.js 18+ and a PostgreSQL database (any of the options below).
+Needs **Node.js 18+** and **Docker** (for the database).
 
 ```bash
 git clone https://github.com/Adarsh1313/confluencr-transaction-ledger-api.git
 cd confluencr-transaction-ledger-api
+docker compose up -d
 npm install
-cp .env.example .env        # then set DATABASE_URL (see below)
-npm run migrate             # creates the tables
-npm run dev                 # http://localhost:3020, docs at http://localhost:3020/docs
+cp .env.example .env
+npm run dev
 ```
 
-**Choose a database for `DATABASE_URL`:**
+The API runs at `http://localhost:3020` and creates its tables on first start. Open **http://localhost:3020/docs** to try every endpoint in the browser.
 
-| Option | `DATABASE_URL` |
-|---|---|
-| Docker (`docker compose up -d`) | `postgresql://postgres:postgres@localhost:5432/ledger` |
-| Your own Postgres | `postgresql://USER:PASSWORD@HOST:5432/DBNAME` |
-| Supabase (free) | Project → Connect → **Session pooler** connection string |
+No Docker? Put any Postgres connection string in `.env` as `DATABASE_URL` and skip `docker compose up -d`.
 
-Tables are created in a dedicated `ledger` schema (override with `DB_SCHEMA`). Other settings: `PORT` (default 3020), `LOG_LEVEL` (default `info`).
+## Check it against the brief
 
-### Tests
+With the server running, in a second terminal:
+
+```bash
+npm run verify
+```
+
+This walks through every section of the assessment (create account, transactions, duplicates, balance, history with filtering, pagination and sorting, data integrity, validations, error handling, transfers) against the live API and prints a pass or fail for each check.
+
+## Tests
 
 ```bash
 npm test
 ```
 
-The tests run against a real Postgres, in a separate `ledger_test` schema that is wiped on every run, so they never touch app data. They call the API exactly as a client would. There is one test per rule in the brief, plus concurrency tests (20 simultaneous debits, a retry storm, opposite transfers).
+84 automated tests run against a real Postgres, in a separate `ledger_test` schema that is rebuilt on every run, so they never touch app data. They call the API exactly as a client would. There is one test per rule in the brief, plus concurrency tests: 20 simultaneous debits, a retry storm, opposite transfers, and a transfer that fails halfway and rolls back.
 
-Other scripts: `npm run typecheck`, `npm run build && npm start` (production build).
+## Endpoints
+
+| Method | Path | What it does |
+|---|---|---|
+| `POST` | `/api/v1/accounts` | Create an account (balance starts at 0) |
+| `GET` | `/api/v1/accounts/:id/balance` | Current balance |
+| `POST` | `/api/v1/accounts/:id/transactions` | Credit or debit |
+| `GET` | `/api/v1/accounts/:id/transactions` | History: `?type=credit\|debit&page=&limit=` |
+| `GET` | `/api/v1/accounts/:id/attempts` | Rejected debits (audit log) |
+| `POST` | `/api/v1/transfers` | Move money between two accounts (bonus) |
+| `GET` | `/api/v1/transfers/:id` | One transfer |
+
+Full request and response examples, and every error code: **[docs/API.md](docs/API.md)**. All amounts are integers in paise: `15050` = ₹150.50.
 
 ## How correctness is guaranteed
 
 | Requirement | How |
 |---|---|
-| Debit never overdraws | The account row is locked (`SELECT … FOR UPDATE`) for the whole operation, so concurrent requests on one account queue up. A `CHECK (balance >= 0)` constraint is the safety net. |
-| Atomicity | Writing the transaction and updating the balance happen inside one database transaction: both commit or neither does. |
-| Duplicate `reference_id` | Checked under the lock and backed by `UNIQUE (account_id, reference_id)`. Returns `409` with the original. |
-| Immutability | No edit or delete endpoints, **and** a Postgres trigger rejects any `UPDATE`/`DELETE` on `transactions`, even from a direct database connection. |
-| Balance consistency | The stored balance is updated in the same database transaction as each Transaction. Tests recompute the balance from the ledger after concurrent bursts and compare. |
-| Transfers | Transfer row + debit + credit in one database transaction. Both accounts are locked in sorted ID order so opposite transfers can't deadlock. |
-| Rejected debits | Never touch the ledger. Logged separately in an audit table (`/attempts`), like a bank's internal log versus its official statement. |
-| Money precision | Integers in paise, never floating point. |
+| A debit never overdraws | The account row is locked (`SELECT … FOR UPDATE`) for the whole operation, so concurrent requests on one account queue up. `CHECK (balance >= 0)` is the safety net. |
+| Atomicity | The transaction row and the balance update are written in one database transaction: both commit or neither does. |
+| Duplicate `reference_id` | Checked under the lock, backed by `UNIQUE (account_id, reference_id)`. Returns `409` with the original. |
+| Immutability | No edit or delete endpoints, **and** a Postgres trigger rejects any `UPDATE`/`DELETE` on `transactions`. |
+| Balance consistency | The balance is updated in the same database transaction as each Transaction. Tests recompute it from the ledger after concurrent bursts. |
+| Transfers | Transfer row + debit + credit in one database transaction, accounts locked in sorted order so opposite transfers can't deadlock. |
+| Validation and errors | Every request is checked against a Zod schema. Every error has one shape: `{ "error": { "code", "message", "details" } }`. |
 
 ## Project structure
 
 ```
-migrations/          versioned SQL: tables, constraints, indexes, immutability trigger
+migrations/          SQL: tables, constraints, indexes, immutability trigger
+scripts/verify.ts    brief-by-brief check against a running server
 src/
-  app.ts             builds the Fastify app (shared by server and tests)
-  server.ts          starts the HTTP server
-  migrate.ts         applies pending migrations
+  server.ts          starts the server (applies migrations first)
+  app.ts             builds the app; shared by the server and the tests
   config.ts          environment variables
   db.ts              connection pool + "run inside a database transaction" helper
+  migrate.ts         applies pending migrations
   errors.ts          error types and the single error response shape
-  ids.ts             prefixed IDs (acc_, txn_, trf_, att_)
-  schemas.ts         shared Zod schemas (amount, pagination, errors)
-  modules/
-    accounts.ts      create account, get balance, row locking
-    transactions.ts  credit/debit, history
-    attempts.ts      audit log of rejected money movements
+  schemas.ts         shared validation rules (amount, pagination, errors)
+  ids.ts             prefixed IDs
+  modules/           one file per resource: its routes, validation and SQL
+    accounts.ts      create account, balance, row locking
+    transactions.ts  credit, debit, history
+    attempts.ts      audit log of rejected debits
     transfers.ts     atomic transfers
 test/                API-level tests against a real database
 ```
 
 ## Assumptions
 
-- **Amounts are integers in paise** (100 paise = ₹1). Integers avoid floating-point rounding errors. The brief's examples (100, 50, 30) work as written.
-- **INR only, no currency field.** Walnut Folks Group is India-based, but Confluencr runs campaigns in 15+ countries, so multi-currency is a likely next step. It would mean a `currency` column on accounts, rejecting or converting cross-currency transfers, and per-currency minor units.
-- **No authentication.** The brief doesn't mention users. In production every route would sit behind auth, and accounts would belong to users.
-- **`description` is optional.** The brief lists it as a field but not as a required validation. Max 255 characters.
-- **`reference_id` is scoped per account.** The same reference can be used on different accounts. Only a *successful* transaction claims a reference, so a debit rejected for insufficient balance can be retried with the same `reference_id`.
-- **A duplicate `reference_id` returns `409`** with the original transaction, even if the new amount differs, so the client can see what was actually recorded.
-- **Rejected debits are not transactions.** They are stored as *attempts* for auditing, never in history, and never affect the balance. Malformed requests (`400`) are not logged.
-- **Transfers** are recorded as one transfer plus a debit and a credit, each tagged with `transfer_id`. Their internal reference is `transfer:<transfer id>`, so client `reference_id`s may not start with `transfer:`. A transfer's own `reference_id` is unique per source account.
-- **Limits:** name 1–100 chars, `reference_id` 1–100 chars, amount 1 to 10¹² paise (₹1,000 crore), `limit` max 100 per page.
-- **Ordering:** newest first by `created_at`, ties broken by `id` so pages never shuffle.
-- **Every transaction stores `balance_after`** (the running balance, like a bank statement). It's not required by the brief, but it makes history self-explanatory.
+Amounts are integers in paise, INR only, and there is no authentication. `reference_id` is unique per account, and a duplicate returns `409` with the original. Rejected debits never touch the ledger; they are logged separately as attempts.
 
-## Possible next steps
+Full list: **[ASSUMPTIONS.md](ASSUMPTIONS.md)**. Design decisions and trade-offs: [docs/decisions.md](docs/decisions.md).
 
-Authentication and account ownership · multi-currency · email/SMS alerts on failed attempts · reversals as compensating transactions · cursor pagination for very long histories · rate limiting.
+## Configuration
+
+| Variable | Default | |
+|---|---|---|
+| `DATABASE_URL` | (required) | Postgres connection string |
+| `PORT` | `3020` | HTTP port |
+| `DB_SCHEMA` | `ledger` | Postgres schema the tables live in |
+| `LOG_LEVEL` | `info` | `silent`, `info`, `debug`, … |

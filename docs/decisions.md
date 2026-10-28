@@ -41,7 +41,4 @@ Plain-language record of every engineering decision, the options considered and 
 
 ## Assumptions
 
-- **INR only.** All amounts are integers in paise; there is no currency field. Walnut Folks Group is India-based (Bengaluru/Mumbai), but Confluencr runs campaigns across 15+ countries and Intent Farm has served overseas clients (e.g. Scalapay), so multi-currency is a likely future need. Adding it later means a `currency` column on accounts, rejecting transfers across currencies (or adding FX conversion), and per-currency minor units (e.g. JPY has none).
-- **No authentication.** In production every route sits behind auth and accounts belong to a user.
-- **Rejected attempts are not transactions.** They live in an audit log and never appear in transaction history or affect balance.
-- **Description is optional.** The brief lists it as a field but not as a required validation.
+See [ASSUMPTIONS.md](../ASSUMPTIONS.md).
