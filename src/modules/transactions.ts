@@ -5,10 +5,14 @@ import { AppError, insufficientBalance } from '../errors.js';
 import { newId } from '../ids.js';
 import {
   accountIdParams,
+  accountNotFoundExample,
   amountSchema,
   descriptionSchema,
-  errorResponseSchema,
+  EXAMPLE_ACCOUNT_ID,
+  errorResponse,
+  ok,
   pageMeta,
+  paginationErrorExample,
   paginationMeta,
   paginationQuery,
   referenceIdSchema,
@@ -18,17 +22,31 @@ import {
 import { assertAccountExists, lockAccount } from './accounts.js';
 import { recordAttempt } from './attempts.js';
 
-export const transactionSchema = z.object({
-  id: z.string(),
-  account_id: z.string(),
-  type: transactionTypeSchema,
-  amount: z.number().describe('Amount in paise'),
-  description: z.string().nullable(),
-  reference_id: z.string(),
-  balance_after: z.number().describe('Account balance right after this transaction, in paise'),
-  transfer_id: z.string().nullable().describe('Set when this transaction is one half of a transfer'),
-  created_at: z.string(),
-});
+export const transactionSchema = z
+  .object({
+    id: z.string().describe('Unique transaction ID, prefixed `txn_`'),
+    account_id: z.string().describe('The account this transaction belongs to'),
+    type: transactionTypeSchema.describe('`credit` adds to the balance, `debit` subtracts from it'),
+    amount: z.number().describe('Amount in paise'),
+    description: z.string().nullable().describe('Your note, or null'),
+    reference_id: z.string().describe('Your idempotency key, unique per account'),
+    balance_after: z.number().describe('The account balance right after this transaction, in paise'),
+    transfer_id: z.string().nullable().describe('The transfer this is one half of, or null'),
+    created_at: z.string().describe('When it was recorded (ISO 8601, UTC)'),
+  })
+  .meta({ id: 'Transaction', description: 'One credit or debit on one account. Never edited or deleted.' });
+
+const EXAMPLE_TRANSACTION: Transaction = {
+  id: 'txn_8Hq3ZkW1nVb6RtY0pLs2',
+  account_id: EXAMPLE_ACCOUNT_ID,
+  type: 'credit',
+  amount: 15050,
+  description: 'October salary',
+  reference_id: 'salary-oct',
+  balance_after: 15050,
+  transfer_id: null,
+  created_at: '2026-10-28T10:06:50.781Z',
+};
 
 export type Transaction = z.infer<typeof transactionSchema>;
 
@@ -153,23 +171,66 @@ export const transactionRoutes =
       '/accounts/:id/transactions',
       {
         schema: {
-          tags: ['transactions'],
-          summary: 'Post a credit or debit to an account',
-          description:
-            'Credit increases the balance, debit decreases it. A debit larger than the balance is rejected (422) and recorded as an attempt. Re-sending the same reference_id for the same account returns 409 with the original transaction and changes nothing.',
+          tags: ['Transactions'],
+          operationId: 'createTransaction',
+          summary: 'Record a credit or debit',
+          description: [
+            'A **credit** adds the amount to the balance; a **debit** subtracts it. The transaction and the new balance are saved together, or not at all.',
+            '',
+            '- **Not enough money:** a debit larger than the balance returns `422 INSUFFICIENT_BALANCE`. Nothing changes, and the refusal is logged under attempts.',
+            '- **Retries are safe:** sending the same `reference_id` to the same account again returns `409 DUPLICATE_TRANSACTION` with the original transaction. Nothing changes.',
+            '- **Simultaneous requests** on one account are processed one at a time, so two debits can never spend the same money.',
+          ].join('\n'),
           params: accountIdParams,
-          body: z.strictObject({
-            type: transactionTypeSchema,
-            amount: amountSchema,
-            reference_id: referenceIdSchema,
-            description: descriptionSchema,
-          }),
+          body: z
+            .strictObject({
+              type: transactionTypeSchema.describe('`credit` or `debit`'),
+              amount: amountSchema,
+              reference_id: referenceIdSchema,
+              description: descriptionSchema,
+            })
+            .meta({
+              examples: [{ type: 'credit', amount: 15050, reference_id: 'salary-oct', description: 'October salary' }],
+            }),
           response: {
-            201: transactionSchema,
-            400: errorResponseSchema,
-            404: errorResponseSchema,
-            409: errorResponseSchema,
-            422: errorResponseSchema,
+            201: ok('The recorded transaction, with the new balance in `balance_after`', transactionSchema, EXAMPLE_TRANSACTION),
+            400: errorResponse('The request body is invalid', {
+              badAmount: {
+                summary: 'Amount is zero, negative or not whole',
+                code: 'VALIDATION_ERROR',
+                message: 'Invalid body',
+                details: { issues: [{ field: 'amount', message: 'amount must be greater than 0' }] },
+              },
+              badType: {
+                summary: 'Type is not credit or debit',
+                code: 'VALIDATION_ERROR',
+                message: 'Invalid body',
+                details: { issues: [{ field: 'type', message: 'Invalid option: expected one of "credit"|"debit"' }] },
+              },
+              malformed: { summary: 'Body is not valid JSON', code: 'INVALID_REQUEST_BODY', message: 'Body is not valid JSON but content-type is set to \'application/json\'' },
+            }),
+            404: errorResponse('The account does not exist', { notFound: accountNotFoundExample }),
+            409: errorResponse('This reference_id was already used on this account. Nothing changed.', {
+              duplicate: {
+                summary: 'Retry of a recorded transaction',
+                code: 'DUPLICATE_TRANSACTION',
+                message: 'A transaction with reference_id "salary-oct" already exists for this account',
+                details: { transaction: EXAMPLE_TRANSACTION },
+              },
+            }),
+            422: errorResponse('The debit is larger than the balance. Nothing changed.', {
+              insufficient: {
+                summary: 'Not enough money',
+                code: 'INSUFFICIENT_BALANCE',
+                message: 'Balance 10000 is less than debit 15000',
+                details: { account_id: EXAMPLE_ACCOUNT_ID, balance: 10000, amount: 15000 },
+              },
+              limit: {
+                summary: 'Credit would exceed the maximum balance',
+                code: 'BALANCE_LIMIT_EXCEEDED',
+                message: 'This credit would take the balance above the maximum allowed',
+              },
+            }),
           },
         },
       },
@@ -189,16 +250,37 @@ export const transactionRoutes =
       '/accounts/:id/transactions',
       {
         schema: {
-          tags: ['transactions'],
-          summary: 'List transactions for an account, newest first',
+          tags: ['Transactions'],
+          operationId: 'listTransactions',
+          summary: 'List an account’s transactions',
+          description:
+            'Returns the account’s transactions **newest first**, one page at a time. Filter with `type`, page with `page` and `limit`. Refused debits are not included; see attempts.',
           params: accountIdParams,
           querystring: paginationQuery.extend({
-            type: transactionTypeSchema.optional().describe('Filter by credit or debit; omit for both'),
+            type: transactionTypeSchema.optional().describe('Only `credit` or only `debit`. Omit for both.'),
           }),
           response: {
-            200: z.object({ data: z.array(transactionSchema), pagination: paginationMeta }),
-            400: errorResponseSchema,
-            404: errorResponseSchema,
+            200: ok(
+              'One page of transactions, newest first',
+              z.object({ data: z.array(transactionSchema), pagination: paginationMeta }),
+              {
+                data: [
+                  { ...EXAMPLE_TRANSACTION, id: 'txn_Qm2Lr7Vx0Ny4Tz8Bc1Ks', type: 'debit', amount: 3000, description: 'Groceries', reference_id: 'groceries-1', balance_after: 12050, created_at: '2026-10-28T11:20:04.310Z' },
+                  EXAMPLE_TRANSACTION,
+                ],
+                pagination: { page: 1, limit: 20, total_records: 2, total_pages: 1 },
+              },
+            ),
+            400: errorResponse('A query parameter is invalid', {
+              pagination: paginationErrorExample,
+              badType: {
+                summary: 'Unknown type filter',
+                code: 'VALIDATION_ERROR',
+                message: 'Invalid querystring',
+                details: { issues: [{ field: 'type', message: 'Invalid option: expected one of "credit"|"debit"' }] },
+              },
+            }),
+            404: errorResponse('The account does not exist', { notFound: accountNotFoundExample }),
           },
         },
       },

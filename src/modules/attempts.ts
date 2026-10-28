@@ -4,8 +4,12 @@ import type { Db, DbClient } from '../db.js';
 import { newId } from '../ids.js';
 import {
   accountIdParams,
-  errorResponseSchema,
+  accountNotFoundExample,
+  EXAMPLE_ACCOUNT_ID,
+  errorResponse,
+  ok,
   pageMeta,
+  paginationErrorExample,
   paginationMeta,
   paginationQuery,
   transactionTypeSchema,
@@ -17,18 +21,20 @@ import { assertAccountExists } from './accounts.js';
 // touch the balance and never appear in transaction history (like a bank's
 // internal log vs. the official statement).
 
-export const attemptSchema = z.object({
-  id: z.string(),
-  account_id: z.string(),
-  type: transactionTypeSchema,
-  amount: z.number(),
-  description: z.string().nullable(),
-  reference_id: z.string(),
-  reason_code: z.string().describe('Why it was refused, e.g. INSUFFICIENT_BALANCE'),
-  balance_at_attempt: z.number().describe('Account balance when the attempt was refused'),
-  transfer_to_account_id: z.string().nullable().describe('Destination account when the attempt was a transfer'),
-  created_at: z.string(),
-});
+export const attemptSchema = z
+  .object({
+    id: z.string().describe('Unique attempt ID, prefixed `att_`'),
+    account_id: z.string().describe('The account the money would have left'),
+    type: transactionTypeSchema.describe('Always `debit` today: only debits can be refused for balance'),
+    amount: z.number().describe('The refused amount, in paise'),
+    description: z.string().nullable().describe('The note sent with the request, or null'),
+    reference_id: z.string().describe('The reference_id sent with the request. It stays free to retry.'),
+    reason_code: z.string().describe('Why it was refused, e.g. `INSUFFICIENT_BALANCE`'),
+    balance_at_attempt: z.number().describe('The balance when it was refused, in paise'),
+    transfer_to_account_id: z.string().nullable().describe('The destination, when the attempt was a transfer'),
+    created_at: z.string().describe('When it was refused (ISO 8601, UTC)'),
+  })
+  .meta({ id: 'Attempt', description: 'A debit or transfer the ledger refused. Never affects a balance.' });
 
 interface AttemptRow extends Omit<z.infer<typeof attemptSchema>, 'created_at'> {
   created_at: Date;
@@ -72,14 +78,37 @@ export const attemptRoutes =
       '/accounts/:id/attempts',
       {
         schema: {
-          tags: ['attempts'],
-          summary: 'List refused money movements (audit log) for an account, newest first',
+          tags: ['Attempts'],
+          operationId: 'listAttempts',
+          summary: 'List an account’s refused debits',
+          description:
+            'The audit log of debits and transfers that were refused, newest first. Use it to show customers a “Failed” item, or for support and fraud checks. Malformed requests are not logged here.',
           params: accountIdParams,
           querystring: paginationQuery,
           response: {
-            200: z.object({ data: z.array(attemptSchema), pagination: paginationMeta }),
-            400: errorResponseSchema,
-            404: errorResponseSchema,
+            200: ok(
+              'One page of attempts, newest first',
+              z.object({ data: z.array(attemptSchema), pagination: paginationMeta }),
+              {
+                data: [
+                  {
+                    id: 'att_Xp5Cw9Rk2Dm7Hs0Fv3Jn',
+                    account_id: EXAMPLE_ACCOUNT_ID,
+                    type: 'debit',
+                    amount: 15000,
+                    description: 'November rent',
+                    reference_id: 'rent-nov',
+                    reason_code: 'INSUFFICIENT_BALANCE',
+                    balance_at_attempt: 10000,
+                    transfer_to_account_id: null,
+                    created_at: '2026-10-28T12:41:09.002Z',
+                  },
+                ],
+                pagination: { page: 1, limit: 20, total_records: 1, total_pages: 1 },
+              },
+            ),
+            400: errorResponse('A query parameter is invalid', { pagination: paginationErrorExample }),
+            404: errorResponse('The account does not exist', { notFound: accountNotFoundExample }),
           },
         },
       },

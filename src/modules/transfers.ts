@@ -3,24 +3,48 @@ import type { FastifyPluginAsyncZod } from 'fastify-type-provider-zod';
 import { isUniqueViolation, withDatabaseTransaction, type Db, type DbClient } from '../db.js';
 import { AppError, insufficientBalance } from '../errors.js';
 import { newId } from '../ids.js';
-import { amountSchema, descriptionSchema, errorResponseSchema, referenceIdSchema } from '../schemas.js';
+import {
+  accountNotFoundExample,
+  amountSchema,
+  descriptionSchema,
+  EXAMPLE_ACCOUNT_ID,
+  errorResponse,
+  ok,
+  referenceIdSchema,
+} from '../schemas.js';
 import { lockAccount } from './accounts.js';
 import { recordAttempt } from './attempts.js';
 import { applyToBalance, insertTransaction } from './transactions.js';
 
-export const transferSchema = z.object({
-  id: z.string(),
-  from_account_id: z.string(),
-  to_account_id: z.string(),
-  amount: z.number().describe('Amount in paise'),
-  description: z.string().nullable(),
-  reference_id: z.string(),
-  debit_transaction_id: z.string().describe('The debit on the source account'),
-  credit_transaction_id: z.string().describe('The credit on the destination account'),
-  created_at: z.string(),
-});
+export const transferSchema = z
+  .object({
+    id: z.string().describe('Unique transfer ID, prefixed `trf_`'),
+    from_account_id: z.string().describe('The account the money left'),
+    to_account_id: z.string().describe('The account the money went to'),
+    amount: z.number().describe('Amount in paise'),
+    description: z.string().nullable().describe('Your note, or null'),
+    reference_id: z.string().describe('Your idempotency key, unique per source account'),
+    debit_transaction_id: z.string().describe('The debit recorded on the source account'),
+    credit_transaction_id: z.string().describe('The credit recorded on the destination account'),
+    created_at: z.string().describe('When it was recorded (ISO 8601, UTC)'),
+  })
+  .meta({ id: 'Transfer', description: 'Money moved between two accounts: one debit and one credit, recorded together.' });
 
 type Transfer = z.infer<typeof transferSchema>;
+
+const EXAMPLE_DESTINATION_ID = 'acc_9Tn6Bq2Wy8Lc4Mx1Pz7G';
+
+const EXAMPLE_TRANSFER: Transfer = {
+  id: 'trf_2Vk8Ns5Qa1Hd9Jy3Rw6E',
+  from_account_id: EXAMPLE_ACCOUNT_ID,
+  to_account_id: EXAMPLE_DESTINATION_ID,
+  amount: 3000,
+  description: 'Dinner split',
+  reference_id: 'split-dinner',
+  debit_transaction_id: 'txn_5Gm1Xc8Rt3Vb0Lp6Qz9W',
+  credit_transaction_id: 'txn_7Kd4Yh2Ns9Fq1Wm5Tc8B',
+  created_at: '2026-10-28T13:02:44.517Z',
+};
 
 interface TransferRow extends Omit<Transfer, 'created_at'> {
   created_at: Date;
@@ -156,23 +180,66 @@ export const transferRoutes =
       '/transfers',
       {
         schema: {
-          tags: ['transfers'],
-          summary: 'Transfer money from one account to another, atomically',
-          description:
-            'Debits the source and credits the destination in one database transaction. If anything fails, nothing changes. reference_id is unique per source account.',
-          body: z.strictObject({
-            from_account_id: z.string().min(1),
-            to_account_id: z.string().min(1),
-            amount: amountSchema,
-            reference_id: referenceIdSchema,
-            description: descriptionSchema,
-          }),
+          tags: ['Transfers'],
+          operationId: 'createTransfer',
+          summary: 'Transfer money between accounts',
+          description: [
+            'Moves `amount` from one account to another. A debit on the source and a credit on the destination are recorded **together or not at all**: a half-finished transfer is impossible.',
+            '',
+            'Both transactions appear in each account’s history with the same `transfer_id`. The `reference_id` is unique per source account, so retrying a transfer never moves money twice.',
+          ].join('\n'),
+          body: z
+            .strictObject({
+              from_account_id: z.string().min(1).describe('The account to take money from'),
+              to_account_id: z.string().min(1).describe('The account to send money to. Must be different.'),
+              amount: amountSchema,
+              reference_id: referenceIdSchema.describe('Your idempotency key, unique per source account'),
+              description: descriptionSchema,
+            })
+            .meta({
+              examples: [
+                {
+                  from_account_id: EXAMPLE_ACCOUNT_ID,
+                  to_account_id: EXAMPLE_DESTINATION_ID,
+                  amount: 3000,
+                  reference_id: 'split-dinner',
+                  description: 'Dinner split',
+                },
+              ],
+            }),
           response: {
-            201: transferSchema,
-            400: errorResponseSchema,
-            404: errorResponseSchema,
-            409: errorResponseSchema,
-            422: errorResponseSchema,
+            201: ok('The completed transfer, with both transaction IDs', transferSchema, EXAMPLE_TRANSFER),
+            400: errorResponse('The request body is invalid', {
+              missingField: {
+                summary: 'A required field is missing',
+                code: 'VALIDATION_ERROR',
+                message: 'Invalid body',
+                details: { issues: [{ field: 'to_account_id', message: 'Invalid input: expected string, received undefined' }] },
+              },
+            }),
+            404: errorResponse('One of the accounts does not exist. Nothing changed.', { notFound: accountNotFoundExample }),
+            409: errorResponse('This reference_id was already used for a transfer from this account. Nothing changed.', {
+              duplicate: {
+                summary: 'Retry of a completed transfer',
+                code: 'DUPLICATE_TRANSFER',
+                message: 'A transfer with reference_id "split-dinner" already exists for this source account',
+                details: { transfer: EXAMPLE_TRANSFER },
+              },
+            }),
+            422: errorResponse('The transfer cannot be made. Nothing changed.', {
+              insufficient: {
+                summary: 'Source has too little money',
+                code: 'INSUFFICIENT_BALANCE',
+                message: 'Balance 2000 is less than debit 3000',
+                details: { account_id: EXAMPLE_ACCOUNT_ID, balance: 2000, amount: 3000 },
+              },
+              sameAccount: {
+                summary: 'Source and destination are the same',
+                code: 'SAME_ACCOUNT_TRANSFER',
+                message: 'Source and destination accounts must be different',
+                details: { account_id: EXAMPLE_ACCOUNT_ID },
+              },
+            }),
           },
         },
       },
@@ -192,10 +259,22 @@ export const transferRoutes =
       '/transfers/:id',
       {
         schema: {
-          tags: ['transfers'],
-          summary: 'Get a transfer by id',
-          params: z.object({ id: z.string().min(1).describe('Transfer ID, e.g. trf_…') }),
-          response: { 200: transferSchema, 404: errorResponseSchema },
+          tags: ['Transfers'],
+          operationId: 'getTransfer',
+          summary: 'Get a transfer',
+          description: 'Returns one transfer, including the IDs of its debit and credit transactions.',
+          params: z.object({ id: z.string().min(1).describe('The transfer ID, e.g. `trf_2Vk8Ns5Qa1Hd9Jy3Rw6E`') }),
+          response: {
+            200: ok('The transfer', transferSchema, EXAMPLE_TRANSFER),
+            404: errorResponse('The transfer does not exist', {
+              notFound: {
+                summary: 'Transfer does not exist',
+                code: 'TRANSFER_NOT_FOUND',
+                message: 'Transfer trf_doesNotExist0000000 does not exist',
+                details: { transfer_id: 'trf_doesNotExist0000000' },
+              },
+            }),
+          },
         },
       },
       async (request) => {

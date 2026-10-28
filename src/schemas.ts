@@ -25,7 +25,9 @@ export const descriptionSchema = z.string().trim().max(255).optional().describe(
 export const transactionTypeSchema = z.enum(['credit', 'debit']);
 export type TransactionType = z.infer<typeof transactionTypeSchema>;
 
-export const accountIdParams = z.object({ id: z.string().min(1).describe('Account ID, e.g. acc_…') });
+export const accountIdParams = z.object({
+  id: z.string().min(1).describe('The account ID, e.g. `acc_4fK2pQ9xTb1LmZ7cR3sV`'),
+});
 
 export const errorResponseSchema = z
   .object({
@@ -36,6 +38,47 @@ export const errorResponseSchema = z
     }),
   })
   .describe('Every error uses this shape');
+
+// Response helpers for the docs: each status gets a human description and
+// realistic example bodies, which the API reference renders next to the code.
+
+export const ok = <T extends z.ZodType>(description: string, schema: T, example: z.output<T>) => ({
+  description,
+  content: { 'application/json': { schema, example } },
+});
+
+type ErrorExample = { summary: string; code: string; message: string; details?: Record<string, unknown> };
+
+export const errorResponse = (description: string, examples: Record<string, ErrorExample>) => ({
+  description,
+  content: {
+    'application/json': {
+      schema: errorResponseSchema,
+      examples: Object.fromEntries(
+        Object.entries(examples).map(([name, { summary, code, message, details = {} }]) => [
+          name,
+          { summary, value: { error: { code, message, details } } },
+        ]),
+      ),
+    },
+  },
+});
+
+export const EXAMPLE_ACCOUNT_ID = 'acc_4fK2pQ9xTb1LmZ7cR3sV';
+
+export const accountNotFoundExample: ErrorExample = {
+  summary: 'Account does not exist',
+  code: 'ACCOUNT_NOT_FOUND',
+  message: 'Account acc_doesNotExist0000000 does not exist',
+  details: { account_id: 'acc_doesNotExist0000000' },
+};
+
+export const paginationErrorExample: ErrorExample = {
+  summary: 'Bad page or limit',
+  code: 'INVALID_PAGINATION',
+  message: 'Invalid querystring',
+  details: { issues: [{ field: 'limit', message: 'Too big: expected number to be <=100' }] },
+};
 
 export const paginationQuery = z.object({
   page: z.coerce.number().int().min(1).default(1).describe('Page number, starting at 1'),

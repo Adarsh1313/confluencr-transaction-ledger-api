@@ -3,14 +3,16 @@ import type { FastifyPluginAsyncZod } from 'fastify-type-provider-zod';
 import type { Db, DbClient } from '../db.js';
 import { accountNotFound } from '../errors.js';
 import { newId } from '../ids.js';
-import { accountIdParams, errorResponseSchema } from '../schemas.js';
+import { accountIdParams, accountNotFoundExample, EXAMPLE_ACCOUNT_ID, errorResponse, ok } from '../schemas.js';
 
-export const accountSchema = z.object({
-  id: z.string(),
-  name: z.string(),
-  balance: z.number().describe('Current balance in paise'),
-  created_at: z.string().describe('ISO 8601 timestamp'),
-});
+export const accountSchema = z
+  .object({
+    id: z.string().describe('Unique account ID, prefixed `acc_`'),
+    name: z.string().describe('Account holder name'),
+    balance: z.number().describe('Current balance in paise'),
+    created_at: z.string().describe('When the account was opened (ISO 8601, UTC)'),
+  })
+  .meta({ id: 'Account', description: 'A named holder of money. Its balance changes only through transactions.' });
 
 export interface AccountRow {
   id: string;
@@ -44,12 +46,38 @@ export const accountRoutes =
       '/accounts',
       {
         schema: {
-          tags: ['accounts'],
-          summary: 'Create an account (balance always starts at 0)',
-          body: z.strictObject({
-            name: z.string().trim().min(1, 'name is required').max(100).describe('Account holder name'),
-          }),
-          response: { 201: accountSchema, 400: errorResponseSchema },
+          tags: ['Accounts'],
+          operationId: 'createAccount',
+          summary: 'Create an account',
+          description:
+            'Opens a new account for a holder. The server generates the `id` and `created_at`, and the balance always starts at `0`. Sending a `balance` (or any field other than `name`) is rejected, so no account can start with money it was never credited.',
+          body: z
+            .strictObject({
+              name: z.string().trim().min(1, 'name is required').max(100).describe('Account holder name, 1–100 characters'),
+            })
+            .meta({ examples: [{ name: 'Asha Rao' }] }),
+          response: {
+            201: ok('The new account', accountSchema, {
+              id: EXAMPLE_ACCOUNT_ID,
+              name: 'Asha Rao',
+              balance: 0,
+              created_at: '2026-10-28T10:06:50.106Z',
+            }),
+            400: errorResponse('The request body is invalid', {
+              missingName: {
+                summary: 'Name missing or blank',
+                code: 'VALIDATION_ERROR',
+                message: 'Invalid body',
+                details: { issues: [{ field: 'name', message: 'name is required' }] },
+              },
+              balanceSent: {
+                summary: 'Tried to set a balance',
+                code: 'VALIDATION_ERROR',
+                message: 'Invalid body',
+                details: { issues: [{ field: null, message: 'Unrecognized key: "balance"' }] },
+              },
+            }),
+          },
         },
       },
       async (request, reply) => {
@@ -65,12 +93,19 @@ export const accountRoutes =
       '/accounts/:id/balance',
       {
         schema: {
-          tags: ['accounts'],
-          summary: 'Get the current balance of an account',
+          tags: ['Accounts'],
+          operationId: 'getBalance',
+          summary: 'Get an account balance',
+          description:
+            'Returns the current balance in paise. The balance always equals the sum of the account’s credits minus its debits.',
           params: accountIdParams,
           response: {
-            200: z.object({ account_id: z.string(), balance: z.number().describe('Balance in paise') }),
-            404: errorResponseSchema,
+            200: ok(
+              'The current balance',
+              z.object({ account_id: z.string(), balance: z.number().describe('Balance in paise') }),
+              { account_id: EXAMPLE_ACCOUNT_ID, balance: 15050 },
+            ),
+            404: errorResponse('The account does not exist', { notFound: accountNotFoundExample }),
           },
         },
       },
