@@ -18,9 +18,18 @@ describe('health and errors', () => {
     });
   });
 
-  it('serves the Swagger docs', async () => {
-    const res = await ctx.app().inject({ method: 'GET', url: '/docs/json' });
-    expect(res.statusCode).toBe(200);
-    expect(res.json().info.title).toBe('Transaction Ledger API');
+  it('serves the API reference and its OpenAPI document', async () => {
+    const page = await ctx.app().inject({ method: 'GET', url: '/docs/' });
+    expect(page.statusCode).toBe(200);
+    expect(page.headers['content-type']).toMatch(/text\/html/);
+
+    const spec = (await ctx.app().inject({ method: 'GET', url: '/docs/openapi.json' })).json();
+    expect(spec.info.title).toBe('Transaction Ledger API');
+    expect(Object.keys(spec.paths)).toEqual(
+      expect.arrayContaining(['/api/v1/accounts', '/api/v1/accounts/{id}/transactions', '/api/v1/transfers']),
+    );
+    // Every documented error response carries a realistic example body.
+    const created = spec.paths['/api/v1/accounts/{id}/transactions'].post.responses;
+    expect(created['409'].content['application/json'].examples.duplicate.value.error.code).toBe('DUPLICATE_TRANSACTION');
   });
 });
