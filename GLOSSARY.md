@@ -16,3 +16,8 @@ _Avoid_: entry, record, payment.
 **Paise**: The unit of every amount in the system. 100 paise = ₹1.
 
 **Database transaction**: The all-or-nothing wrapper around a group of database writes. Always say "database transaction" for this, never just "transaction".
+
+**Attempt**: A request to move money that the ledger rules refused (e.g. insufficient balance). Recorded in the audit log, never as a Transaction, and never affects a Balance. Shown to customers as "Failed".
+_Avoid_: failed transaction, rejected transaction.
+
+**Transfer**: A movement of money between two Accounts, made of exactly one Debit on the source and one Credit on the destination, written together or not at all.
